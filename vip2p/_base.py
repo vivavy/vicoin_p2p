@@ -26,10 +26,13 @@ class vip2p(vip2p):
     SEND = b"SEND"
 
     @staticmethod
-    def request(conn:socket.socket, cmd:bytes, data:str|bytes=b""):
-        conn.sendall(vip2p.NAME + b"\r\n" + vip2p.VERSION +
-                     b"\r\n" + cmd + b"\r\n" +
-                     (data if type(data) == bytes else data.encode()))
+    def request(conn:socket.socket, cmd:bytes,
+                data:str|bytes=b"")->bytes:
+        if isinstance(data, str):
+            data = data.encode()
+        conn.sendall(r:=(vip2p.NAME + b"\r\n" + vip2p.VERSION +
+                     b"\r\n" + cmd + b"\r\n" + data))
+        return r
     
     @staticmethod
     def parse(data: bytes) -> list[bytes]:
@@ -88,6 +91,7 @@ class CNode(CNode):
         self.stat = "NOINIT"
         self.debug = debug
         self.send = False
+        self.recv = None
     
     def __del__(self):
         if self.debug:
@@ -103,9 +107,11 @@ class CNode(CNode):
     @threaded
     def recvdm(self):
         while True:
-            while not self.send:
-                ...
-            self.send = True
+            recv = self.conn.recv(1024)
+            if vip2p.parse(recv)[0] == vip2p.SEND:
+                self.send = True
+            else:
+                self.recv = recv
     
     def init(self):
         if self.debug:
@@ -114,7 +120,11 @@ class CNode(CNode):
         self.wait_for_send()
         vip2p.request(self.conn, vip2p.INIT)
         self.send = False
-        self.uuid = _uuid.UUID(bytes=vip2p.parse(self.conn.recv(1024))[1])
+        while not self.recv: ...
+        a = self.recv
+        if self.debug:
+            print("[DEBUG][CLIENT] UUID recieved:", repr(a))
+        self.uuid = _uuid.UUID(vip2p.parse(a)[1].decode())
         if self.debug:
             print("Done with UUID = {%s}" % str(self.uuid))
     
@@ -124,9 +134,11 @@ class CNode(CNode):
         self.wait_for_send()
         vip2p.request(self.conn, vip2p.DISCONN)
         self.send = False
+        while not self.recv: ...
+        a = vip2p.parse(self.recv)[0].decode()
         if self.debug:
-            print("Done with status",
-              vip2p.parse(self.conn.recv(4096))[0].decode())
+            print("Done with status", a)
+        del self.recvdmt
 
 
 class SNode(SNode):
@@ -148,6 +160,7 @@ class SNode(SNode):
         self.wait = True
         self.debug = debug
         self.recv = None
+        self.recvdmt = self.recvdm()
     
     def __del__(self):
         if self.debug:
@@ -177,21 +190,24 @@ class SNode(SNode):
             self.init()
         
         if cmd == vip2p.DISCONN:
-            self.disconn(self, data)
+            self.disconn(data)
+        
+        self.recv = None
     
     def disconn(self, data):
         if self.debug:
             print("[DEBUG][SERNOD] Disconnecting... ", end="")
         vip2p.request(self.conn, vip2p.OK)
-        self.serv.disconn(data)
+        self.serv.disconn(self, data)
         if self.debug:
             print("Done")
+        del self.recvdmt
     
     def init(self):
         if self.debug:
             print("[DEBUG][SERNOD] Initializing... ", end="")
-        self.recvdmt = self.recvdm()
-        vip2p.request(self.conn, vip2p.OK, bytes(self.uuid))
+        r = vip2p.request(self.conn, vip2p.OK, self.uuid.hex)
         self.serv.users[self.uuid] = self
         if self.debug:
             print("Done")
+        self.wait = True
